@@ -249,13 +249,14 @@ def train_sg_pair(model, word, context_index, alpha, learn_vectors=True, learn_h
     if model.negative:
         # use this word (label = 1) + `negative` other random words not from this sentence (label = 0)
         word_indices = [predict_word.index]
+        w = predict_word.weight
         while len(word_indices) < model.negative + 1:
             w = model.cum_table.searchsorted(model.random.randint(model.cum_table[-1]))
             if w != predict_word.index:
                 word_indices.append(w)
         l2b = model.syn1neg[word_indices]  # 2d matrix, k+1 x layer1_size
-        fb = 1. / (1. + exp(-dot(l1, l2b.T)))  # propagate hidden -> output
-        gb = (model.neg_labels - fb) * alpha  # vector of error gradients multiplied by the learning rate
+        fb = 1. / (1. + exp(-dot(w*l1, l2b.T)))  # propagate hidden -> output
+        gb = (model.neg_labels - fb) * alpha * w  # vector of error gradients multiplied by the learning rate
         if learn_hidden:
             model.syn1neg[word_indices] += outer(gb, l1)  # learn hidden -> output
         neu1e += dot(gb, l2b)  # save error
@@ -335,16 +336,16 @@ class Vocab(object):
 
 class Flow2Vec(utils.SaveLoad):
     """
-    Class for training, using and evaluating neural networks described in https://code.google.com/p/flow2vec/
+    Class for training, using and evaluating neural networks described in https://code.google.com/p/word2vec/
 
     The model can be stored/loaded via its `save()` and `load()` methods, or stored/loaded in a format
-    compatible with the original flow2vec implementation via `save_flow2vec_format()` and `load_flow2vec_format()`.
+    compatible with the original word2vec implementation via `save_flow2vec_format()` and `load_flow2vec_format()`.
 
     """
     def __init__(
             self, sentences=None, size=100, alpha=0.025, window=5, min_count=5,
             max_vocab_size=None, sample=1e-3, seed=1, workers=3, min_alpha=0.0001,
-            sg=0, hs=0, negative=5, cbow_mean=1, hashfxn=hash, iter=5, null_word=0,
+            sg=1, hs=0, negative=5, cbow_mean=1, hashfxn=hash, iter=5, null_word=0,
             trim_rule=None, sorted_vocab=1, batch_words=MAX_WORDS_IN_BATCH):
         """
         Initialize the model from an iterable of `sentences`. Each sentence is a
@@ -358,8 +359,8 @@ class Flow2Vec(utils.SaveLoad):
         If you don't supply `sentences`, the model is left uninitialized -- use if
         you plan to initialize it in some other way.
 
-        `sg` defines the training algorithm. By default (`sg=0`), CBOW is used.
-        Otherwise (`sg=1`), skip-gram is employed.
+        `sg` defines the training algorithm. By default (`sg=1`), skip-gram is used.
+        Otherwise (`sg=0`), CBOW is employed.
 
         `size` is the dimensionality of the feature vectors.
 
@@ -517,12 +518,16 @@ class Flow2Vec(utils.SaveLoad):
         total_words = 0
         min_reduce = 1
         vocab = defaultdict(int)
+        avg_weight = defaultdict(float) # average weight. metrics like packets, bytes, pktsize
         for sentence_no, sentence in enumerate(sentences):
             if sentence_no % progress_per == 0:
                 logger.info("PROGRESS: at sentence #%i, processed %i words, keeping %i word types",
                             sentence_no, sum(itervalues(vocab)) + total_words, len(vocab))
-            for word in sentence:
+            for word_info in sentence:
+                word, info = word_info.split("#")
+                avg_weight[word] = avg_weight[word] * vocab[word] + float(info)
                 vocab[word] += 1
+                avg_weight[word] /= vocab[word]
 
             if not update:
                 if self.max_vocab_size and len(vocab) > self.max_vocab_size:
@@ -534,6 +539,7 @@ class Flow2Vec(utils.SaveLoad):
                     len(vocab), total_words, sentence_no + 1)
         self.corpus_count = sentence_no + 1
         self.raw_vocab = vocab
+        self.raw_weight = avg_weight
 
     def scale_vocab(self, update, min_count=None, sample=None, dry_run=False, keep_raw_vocab=False, trim_rule=None):
         """
@@ -569,8 +575,9 @@ class Flow2Vec(utils.SaveLoad):
                     retain_words.append(word)
                     retain_total += v
                     original_total += v
+                    w = self.raw_weight[word]
                     if not dry_run:
-                        self.vocab[word] = Vocab(count=v,
+                        self.vocab[word] = Vocab(count=v, weight=w,
                                     index=len(self.index2word))
                         self.index2word.append(word)
                 else:
@@ -579,7 +586,8 @@ class Flow2Vec(utils.SaveLoad):
                     original_total += v
         else:
             logger.info("Updating model with new vocabulary")
-            for word, v in iteritems(self.raw_vocab):
+            for word, v in iteritems(self.raw_vocab):                
+                w = self.raw_weight[word]
                 if not word in self.vocab:
                     # the word does not already exist in vocab
                     if keep_vocab_item(word, v, min_count,
@@ -588,13 +596,18 @@ class Flow2Vec(utils.SaveLoad):
                         retain_total += v
                         original_total += v
                         if not dry_run:
-                            self.vocab[word] = Vocab(count=v,
+                            self.vocab[word] = Vocab(count=v, weight=w,
                                 index=len(self.index2word))
                             self.index2word.append(word)
                     else:
                         drop_unique += 1
                         drop_total += v
                         original_total += v
+                else:
+                    if not dry_run:
+                        self.vocab[word].weight = self.vocab[word].weight * self.vocab[word].count + w * v
+                        self.vocab[word].count +=v
+                        self.vocab[word].weight /= self.vocab[word].count
 
         logger.info("min_count=%d retains %i unique words (drops %i)",
                     min_count, len(retain_words), drop_unique)
@@ -628,6 +641,7 @@ class Flow2Vec(utils.SaveLoad):
         if not dry_run and not keep_raw_vocab:
             logger.info("deleting the raw counts dictionary of %i items", len(self.raw_vocab))
             self.raw_vocab = defaultdict(int)
+            self.raw_weight = defaultdict(float)
 
         logger.info("sample=%g downsamples %i most-common words", sample, downsample_unique)
         logger.info("downsampling leaves estimated %i word corpus (%.1f%% of prior %i)",

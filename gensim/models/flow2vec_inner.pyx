@@ -109,7 +109,7 @@ cdef inline unsigned long long random_int32(unsigned long long *next_random) nog
 
 cdef unsigned long long fast_sentence_sg_neg(
     const int negative, np.uint32_t *cum_table, unsigned long long cum_table_len,
-    REAL_t *syn0, REAL_t *syn1neg, const int size, const np.uint32_t word_index,
+    REAL_t *syn0, REAL_t *syn1neg, const int size, const np.uint32_t word_index, REAL_t weight,
     const np.uint32_t word2_index, const REAL_t alpha, REAL_t *work,
     unsigned long long next_random, REAL_t *word_locks) nogil:
 
@@ -135,10 +135,11 @@ cdef unsigned long long fast_sentence_sg_neg(
 
         row2 = target_index * size
         f = our_dot(&size, &syn0[row1], &ONE, &syn1neg[row2], &ONE)
+        f = f * weight
         if f <= -MAX_EXP or f >= MAX_EXP:
             continue
         f = EXP_TABLE[<int>((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]
-        g = (label - f) * alpha
+        g = (label - f) * alpha * weight
         our_saxpy(&size, &g, &syn1neg[row2], &ONE, work, &ONE)
         our_saxpy(&size, &g, &syn0[row1], &ONE, &syn1neg[row2], &ONE)
 
@@ -286,6 +287,8 @@ def train_batch_sg(model, sentences, alpha, _work):
     cdef unsigned long long cum_table_len
     # for sampling (negative and frequent-word downsampling)
     cdef unsigned long long next_random
+    # per word weight
+    cdef REAL_t weights[MAX_SENTENCE_LEN]
 
     if hs:
         syn1 = <REAL_t *>(np.PyArray_DATA(model.syn1))
@@ -313,6 +316,7 @@ def train_batch_sg(model, sentences, alpha, _work):
             if sample and word.sample_int < random_int32(&next_random):
                 continue
             indexes[effective_words] = word.index
+            weights[effective_words] = word.weight
             if hs:
                 codelens[effective_words] = <int>len(word.code)
                 codes[effective_words] = <np.uint8_t *>np.PyArray_DATA(word.code)
@@ -352,7 +356,7 @@ def train_batch_sg(model, sentences, alpha, _work):
                     if hs:
                         fast_sentence_sg_hs(points[i], codes[i], codelens[i], syn0, syn1, size, indexes[j], _alpha, work, word_locks)
                     if negative:
-                        next_random = fast_sentence_sg_neg(negative, cum_table, cum_table_len, syn0, syn1neg, size, indexes[i], indexes[j], _alpha, work, next_random, word_locks)
+                        next_random = fast_sentence_sg_neg(negative, cum_table, cum_table_len, syn0, syn1neg, size, indexes[i], weights[i], indexes[j], _alpha, work, next_random, word_locks)
 
     return effective_words
 
