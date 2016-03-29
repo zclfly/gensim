@@ -1637,7 +1637,7 @@ class FlowSentences(object):
         154.38.190.125:25/6(smtp#41#335#56#65910#8.17#1176.96),154.38.28.33:80/6(web#50#60448#38#6879#1208.96#181.03)     
 
     """
-    def __init__(self, fname, weight_loc=1, func=None):
+    def __init__(self, fname, weight_loc=1, func=None, limit=None):
         """
         `fname` is the source file name.
         `limit` lines (or no clipped if limit is None, the default).
@@ -1657,6 +1657,7 @@ class FlowSentences(object):
         self.fname = fname
         self.weight_loc = weight_loc
         self.func = func
+        self.limit = limit
 
     def __iter__(self):
         with utils.smart_open(self.fname) as fin:
@@ -1672,7 +1673,7 @@ class FlowSentences(object):
                         if self.func is None:
                             weight = log(ll[self.weight_loc])
                         else:
-                            weight = func(ll[1:])                    
+                            weight = self.func(ll[1:])                    
                     newlines.append((srv,weight))
                 yield newlines
 
