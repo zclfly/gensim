@@ -69,7 +69,7 @@ cdef void our_saxpy_noblas(const int *N, const float *alpha, const float *X, con
 
 cdef void fast_sentence_sg_hs(
     const np.uint32_t *word_point, const np.uint8_t *word_code, const int codelen,
-    REAL_t *syn0, REAL_t *syn1, const int size,
+    REAL_t *syn0, REAL_t *syn1, const int size, REAL_t weight,
     const np.uint32_t word2_index, const REAL_t alpha, REAL_t *work, REAL_t *word_locks) nogil:
 
     cdef long long a, b
@@ -80,10 +80,11 @@ cdef void fast_sentence_sg_hs(
     for b in range(codelen):
         row2 = word_point[b] * size
         f = our_dot(&size, &syn0[row1], &ONE, &syn1[row2], &ONE)
+        f = f * weight
         if f <= -MAX_EXP or f >= MAX_EXP:
             continue
         f = EXP_TABLE[<int>((f + MAX_EXP) * (EXP_TABLE_SIZE / MAX_EXP / 2))]
-        g = (1 - word_code[b] - f) * alpha
+        g = (1 - word_code[b] - f) * alpha * weight
         our_saxpy(&size, &g, &syn1[row2], &ONE, work, &ONE)
         our_saxpy(&size, &g, &syn0[row1], &ONE, &syn1[row2], &ONE)
     our_saxpy(&size, &word_locks[word2_index], work, &ONE, &syn0[row1], &ONE)
@@ -289,6 +290,7 @@ def train_batch_sg(model, sentences, alpha, _work):
     cdef unsigned long long next_random
     # per word weight
     cdef REAL_t weights[MAX_SENTENCE_LEN]
+    cdef weight
 
     if hs:
         syn1 = <REAL_t *>(np.PyArray_DATA(model.syn1))
@@ -310,13 +312,15 @@ def train_batch_sg(model, sentences, alpha, _work):
         if not sent:
             continue  # ignore empty sentences; leave effective_sentences unchanged
         for token in sent:
-            word = vlookup[token] if token in vlookup else None
+            # split token to word and word_weight
+            token_word,token_weight = token
+            word = vlookup[token_word] if token_word in vlookup else None
             if word is None:
                 continue  # leaving `effective_words` unchanged = shortening the sentence = expanding the window
             if sample and word.sample_int < random_int32(&next_random):
                 continue
             indexes[effective_words] = word.index
-            weights[effective_words] = word.weight
+            weights[effective_words] = <float>token_weight
             if hs:
                 codelens[effective_words] = <int>len(word.code)
                 codes[effective_words] = <np.uint8_t *>np.PyArray_DATA(word.code)
@@ -354,7 +358,7 @@ def train_batch_sg(model, sentences, alpha, _work):
                     if j == i:
                         continue
                     if hs:
-                        fast_sentence_sg_hs(points[i], codes[i], codelens[i], syn0, syn1, size, indexes[j], _alpha, work, word_locks)
+                        fast_sentence_sg_hs(points[i], codes[i], codelens[i], syn0, syn1, size, weights[i], indexes[j], _alpha, work, word_locks)
                     if negative:
                         next_random = fast_sentence_sg_neg(negative, cum_table, cum_table_len, syn0, syn1neg, size, indexes[i], weights[i], indexes[j], _alpha, work, next_random, word_locks)
 

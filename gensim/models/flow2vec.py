@@ -119,8 +119,15 @@ except ImportError:
         """
         result = 0
         for sentence in sentences:
-            word_vocabs = [model.vocab[w] for w in sentence if w in model.vocab and
-                           model.vocab[w].sample_int > model.random.rand() * 2**32]
+            word_vocabs = []
+            word_weight = []
+            for wi in sentence:
+                w,i = wi
+                if w in model.vocab and model.vocab[w].sample_int > model.random.rand() * 2**32:
+                    word_vocabs.append(model.vocab[w])
+                    word_weight.append(i)
+            #word_vocabs = [model.vocab[w] for w in sentence if w in model.vocab and
+            #               model.vocab[w].sample_int > model.random.rand() * 2**32]
             for pos, word in enumerate(word_vocabs):
                 reduced_window = model.random.randint(model.window)  # `b` in the original flow2vec code
 
@@ -129,7 +136,7 @@ except ImportError:
                 for pos2, word2 in enumerate(word_vocabs[start:(pos + model.window + 1 - reduced_window)], start):
                     # don't train on the `word` itself
                     if pos2 != pos:
-                        train_sg_pair(model, model.index2word[word.index], word2.index, alpha)
+                        train_sg_pair(model, model.index2word[word.index], word_weight[pos], word2.index, alpha)
             result += len(word_vocabs)
         return result
 
@@ -221,7 +228,7 @@ except ImportError:
         return log_prob_sentence
 
 
-def train_sg_pair(model, word, context_index, alpha, learn_vectors=True, learn_hidden=True,
+def train_sg_pair(model, word, weight, context_index, alpha, learn_vectors=True, learn_hidden=True,
                   context_vectors=None, context_locks=None):
     if context_vectors is None:
         context_vectors = model.syn0
@@ -240,8 +247,8 @@ def train_sg_pair(model, word, context_index, alpha, learn_vectors=True, learn_h
     if model.hs:
         # work on the entire tree at once, to push as much work into numpy's C routines as possible (performance)
         l2a = deepcopy(model.syn1[predict_word.point])  # 2d matrix, codelen x layer1_size
-        fa = 1.0 / (1.0 + exp(-dot(l1, l2a.T)))  # propagate hidden -> output
-        ga = (1 - predict_word.code - fa) * alpha  # vector of error gradients multiplied by the learning rate
+        fa = 1.0 / (1.0 + exp(-dot(l1, l2a.T) * weight))  # propagate hidden -> output
+        ga = (1 - predict_word.code - fa) * alpha * weight  # vector of error gradients multiplied by the learning rate
         if learn_hidden:
             model.syn1[predict_word.point] += outer(ga, l1)  # learn hidden -> output
         neu1e += dot(ga, l2a)  # save error
@@ -249,13 +256,12 @@ def train_sg_pair(model, word, context_index, alpha, learn_vectors=True, learn_h
     if model.negative:
         # use this word (label = 1) + `negative` other random words not from this sentence (label = 0)
         word_indices = [predict_word.index]
-        weight = predict_word.weight
         while len(word_indices) < model.negative + 1:
             w = model.cum_table.searchsorted(model.random.randint(model.cum_table[-1]))
             if w != predict_word.index:
                 word_indices.append(w)
         l2b = model.syn1neg[word_indices]  # 2d matrix, k+1 x layer1_size
-        fb = 1. / (1. + exp(-dot(weight*l1, l2b.T)))  # propagate hidden -> output
+        fb = 1. / (1. + exp(-dot(l1, l2b.T) * weight))  # propagate hidden -> output
         gb = (model.neg_labels - fb) * alpha * weight  # vector of error gradients multiplied by the learning rate
         if learn_hidden:
             model.syn1neg[word_indices] += outer(gb, l1)  # learn hidden -> output
@@ -524,7 +530,7 @@ class Flow2Vec(utils.SaveLoad):
                 logger.info("PROGRESS: at sentence #%i, processed %i words, keeping %i word types",
                             sentence_no, sum(itervalues(vocab)) + total_words, len(vocab))
             for word_info in sentence:
-                word, info = word_info.split("#")
+                word, info = word_info
                 avg_weight[word] = avg_weight[word] * vocab[word] + float(info)
                 vocab[word] += 1
                 avg_weight[word] /= vocab[word]
@@ -1627,7 +1633,57 @@ class Text8Corpus(object):
                 sentence.extend(words)
                 while len(sentence) >= self.max_sentence_length:
                     yield sentence[:self.max_sentence_length]
-                    sentence = sentence[self.max_sentence_length:]
+                    sentence = sentence[self.max_sentence_length:]                    
+                    
+class FlowSentences(object):
+    """
+    flow file format: each Service Point Queue one line, sepeated by comma(,).
+    
+    Service Point:
+        sip:sport/proto ( appname#out_packets#out_bytes#in_packets#in_bytes#out_pktsize#in_pktsize )
+    Example:
+    
+        154.38.190.125:25/6(smtp#41#335#56#65910#8.17#1176.96),154.38.28.33:80/6(web#50#60448#38#6879#1208.96#181.03)     
+
+    """
+    def __init__(self, fname, weight_loc=0, func=None):
+        """
+        `fname` is the source file name.
+        `limit` lines (or no clipped if limit is None, the default).
+        `weight_loc` which metric to use
+        `func` compute new metric, such as log , 1/f etc
+
+        Example::
+
+            sentences = FlowSentences('myfile.txt')
+
+        Or for compressed files::
+
+            sentences = FlowSentences('compressed_text.txt.bz2')
+            sentences = FlowSentences('compressed_text.txt.gz')
+
+        """
+        self.fname = fname
+        self.weight_loc = weight_loc
+        self.func = func
+
+    def __iter__(self):
+        with utils.smart_open(self.fname) as fin:
+            for line in itertools.islice(fin, self.limit):
+                lines = utils.to_unicode(line).split(",")
+                newlines = []
+                for l in lines[1:]:
+                    ll = l.split("#")
+                    srv = "%s)"%ll[0]
+                    if self.weight_loc==0 or self.weight_loc > len(ll):
+                        weight = 1.
+                    else:
+                        if self.func is None:
+                            weight = 1./float(ll[self.weight_loc])
+                        else:
+                            weight = func(ll[1:])                    
+                    newlines.append((srv,weight))
+                yield newlines
 
 
 class LineSentence(object):
