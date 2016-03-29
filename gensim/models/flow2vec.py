@@ -524,16 +524,13 @@ class Flow2Vec(utils.SaveLoad):
         total_words = 0
         min_reduce = 1
         vocab = defaultdict(int)
-        avg_weight = defaultdict(float) # average weight. metrics like packets, bytes, pktsize
         for sentence_no, sentence in enumerate(sentences):
             if sentence_no % progress_per == 0:
                 logger.info("PROGRESS: at sentence #%i, processed %i words, keeping %i word types",
                             sentence_no, sum(itervalues(vocab)) + total_words, len(vocab))
             for word_info in sentence:
                 word, info = word_info
-                avg_weight[word] = avg_weight[word] * vocab[word] + float(info)
                 vocab[word] += 1
-                avg_weight[word] /= vocab[word]
 
             if not update:
                 if self.max_vocab_size and len(vocab) > self.max_vocab_size:
@@ -545,7 +542,6 @@ class Flow2Vec(utils.SaveLoad):
                     len(vocab), total_words, sentence_no + 1)
         self.corpus_count = sentence_no + 1
         self.raw_vocab = vocab
-        self.raw_weight = avg_weight
 
     def scale_vocab(self, update, min_count=None, sample=None, dry_run=False, keep_raw_vocab=False, trim_rule=None):
         """
@@ -581,9 +577,8 @@ class Flow2Vec(utils.SaveLoad):
                     retain_words.append(word)
                     retain_total += v
                     original_total += v
-                    w = self.raw_weight[word]
                     if not dry_run:
-                        self.vocab[word] = Vocab(count=v, weight=w,
+                        self.vocab[word] = Vocab(count=v, 
                                     index=len(self.index2word))
                         self.index2word.append(word)
                 else:
@@ -592,8 +587,7 @@ class Flow2Vec(utils.SaveLoad):
                     original_total += v
         else:
             logger.info("Updating model with new vocabulary")
-            for word, v in iteritems(self.raw_vocab):                
-                w = self.raw_weight[word]
+            for word, v in iteritems(self.raw_vocab):   
                 if not word in self.vocab:
                     # the word does not already exist in vocab
                     if keep_vocab_item(word, v, min_count,
@@ -602,7 +596,7 @@ class Flow2Vec(utils.SaveLoad):
                         retain_total += v
                         original_total += v
                         if not dry_run:
-                            self.vocab[word] = Vocab(count=v, weight=w,
+                            self.vocab[word] = Vocab(count=v,
                                 index=len(self.index2word))
                             self.index2word.append(word)
                     else:
@@ -611,9 +605,7 @@ class Flow2Vec(utils.SaveLoad):
                         original_total += v
                 else:
                     if not dry_run:
-                        self.vocab[word].weight = self.vocab[word].weight * self.vocab[word].count + w * v
                         self.vocab[word].count +=v
-                        self.vocab[word].weight /= self.vocab[word].count
 
         logger.info("min_count=%d retains %i unique words (drops %i)",
                     min_count, len(retain_words), drop_unique)
@@ -647,7 +639,6 @@ class Flow2Vec(utils.SaveLoad):
         if not dry_run and not keep_raw_vocab:
             logger.info("deleting the raw counts dictionary of %i items", len(self.raw_vocab))
             self.raw_vocab = defaultdict(int)
-            self.raw_weight = defaultdict(float)
 
         logger.info("sample=%g downsamples %i most-common words", sample, downsample_unique)
         logger.info("downsampling leaves estimated %i word corpus (%.1f%% of prior %i)",
@@ -1646,7 +1637,7 @@ class FlowSentences(object):
         154.38.190.125:25/6(smtp#41#335#56#65910#8.17#1176.96),154.38.28.33:80/6(web#50#60448#38#6879#1208.96#181.03)     
 
     """
-    def __init__(self, fname, weight_loc=0, func=None):
+    def __init__(self, fname, weight_loc=1, func=None):
         """
         `fname` is the source file name.
         `limit` lines (or no clipped if limit is None, the default).
@@ -1674,12 +1665,12 @@ class FlowSentences(object):
                 newlines = []
                 for l in lines[1:]:
                     ll = l.split("#")
-                    srv = "%s)"%ll[0]
+                    srv = ll[0]
                     if self.weight_loc==0 or self.weight_loc > len(ll):
                         weight = 1.
                     else:
                         if self.func is None:
-                            weight = 1./float(ll[self.weight_loc])
+                            weight = log(ll[self.weight_loc])
                         else:
                             weight = func(ll[1:])                    
                     newlines.append((srv,weight))
