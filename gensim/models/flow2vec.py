@@ -249,14 +249,14 @@ def train_sg_pair(model, word, context_index, alpha, learn_vectors=True, learn_h
     if model.negative:
         # use this word (label = 1) + `negative` other random words not from this sentence (label = 0)
         word_indices = [predict_word.index]
-        w = predict_word.weight
+        weight = predict_word.weight
         while len(word_indices) < model.negative + 1:
             w = model.cum_table.searchsorted(model.random.randint(model.cum_table[-1]))
             if w != predict_word.index:
                 word_indices.append(w)
         l2b = model.syn1neg[word_indices]  # 2d matrix, k+1 x layer1_size
-        fb = 1. / (1. + exp(-dot(w*l1, l2b.T)))  # propagate hidden -> output
-        gb = (model.neg_labels - fb) * alpha * w  # vector of error gradients multiplied by the learning rate
+        fb = 1. / (1. + exp(-dot(weight*l1, l2b.T)))  # propagate hidden -> output
+        gb = (model.neg_labels - fb) * alpha * weight  # vector of error gradients multiplied by the learning rate
         if learn_hidden:
             model.syn1neg[word_indices] += outer(gb, l1)  # learn hidden -> output
         neu1e += dot(gb, l2b)  # save error
